@@ -19,17 +19,106 @@
         WebGL builds are not supported on mobile devices.
       </div>
     </div>
+    
     <script>
+      // The base URL for all the file parts on the CDN
+      const BASE_CDN_URL = "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/";
+
+      // --- NEW PART LISTS (Using the full CDN URL) ---
+      const dataParts = [
+          BASE_CDN_URL + "WebGL.data.part1",
+          BASE_CDN_URL + "WebGL.data.part2"
+      ];
+
+      const wasmParts = [
+          BASE_CDN_URL + "WebGL.wasm.part1",
+          BASE_CDN_URL + "WebGL.wasm.part2"
+      ];
+      
+      /**
+       * Fetches and concatenates multiple file parts into a single ArrayBuffer.
+       * This is the heart of the "un-split" hack.
+       */
+      async function fetchAndAssembleParts(urls) {
+          console.log(`[Reassembly] Fetching ${urls.length} parts from the CDN...`);
+          
+          const promises = urls.map(url => fetch(url).then(response => {
+              if (!response.ok) {
+                  throw new Error(`[Reassembly] Failed to fetch part: ${url}. Status: ${response.status}`);
+              }
+              // CRITICAL: Get the data as an ArrayBuffer
+              return response.arrayBuffer();
+          }));
+          
+          const buffers = await Promise.all(promises);
+          
+          let totalSize = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+          let combinedBuffer = new Uint8Array(totalSize);
+          let offset = 0;
+          
+          buffers.forEach(buffer => {
+              combinedBuffer.set(new Uint8Array(buffer), offset);
+              offset += buffer.byteLength;
+          });
+          
+          console.log(`[Reassembly] Successfully assembled ${totalSize / (1024 * 1024)}MB from parts.`);
+          return combinedBuffer.buffer;
+      }
+      
+   
+      // This MUST be defined BEFORE the WebGL.loader.js script runs.
+      // It hooks into the Unity engine's internal fetch mechanism.
+      var Module = {
+          // The Unity loader will call this function instead of its internal 'fetch'
+          unityFetchExternalResource: async function (url, start, length, target, onSuccess, onError) {
+              
+              if (url.endsWith("/WebGL.data")) {
+                  // Intercept WebGL.data request and use our assembly function
+                  console.log("Intercepting WebGL.data request. Assembling parts...");
+                  try {
+                      const buffer = await fetchAndAssembleParts(dataParts);
+                      onSuccess(buffer);
+                  } catch (e) {
+                      onError(e);
+                  }
+                  return;
+              } else if (url.endsWith("/WebGL.wasm")) {
+                  // Intercept WebGL.wasm request and use our assembly function
+                   console.log("Intercepting WebGL.wasm request. Assembling parts...");
+                  try {
+                      // Note: We MUST make sure the response for wasm is application/wasm.
+                      // jsDelivr is often the culprit here, but since we are fetching
+                      // .part files and assembling, this might just work if the parts are
+                      // served without the strict MIME type for binary data.
+                      const buffer = await fetchAndAssembleParts(wasmParts);
+                      onSuccess(buffer);
+                  } catch (e) {
+                      onError(e);
+                  }
+                  return;
+              }
+              
+              // Fallback to default fetch for all other small files (like .framework.js)
+              fetch(url, { method: 'GET', headers: { 'Range': 'bytes=' + start + '-' + (start + length - 1) } })
+                  .then(response => response.arrayBuffer())
+                  .then(onSuccess)
+                  .catch(onError);
+          }
+      };
+      
+      // --- Standard Unity Loader Code ---
       var buildUrl = "Build";
-      var loaderUrl = buildUrl + "/WebGL.loader.js";
+      var loaderUrl = "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.loader.js"; // Full CDN URL
+      
       var config = {
-        dataUrl: buildUrl + "/WebGL.data",
-        frameworkUrl: "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.framework.js",
-        codeUrl: buildUrl + "/WebGL.wasm",
-        streamingAssetsUrl: "StreamingAssets",
-        companyName: "Raw Fury",
-        productName: "Townscaper",
-        productVersion: "0.23",
+          // The loader still needs these names, even though our hook intercepts the fetch
+          dataUrl: buildUrl + "/WebGL.data", 
+          frameworkUrl: "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.framework.js",
+          codeUrl: buildUrl + "/WebGL.wasm", 
+          streamingAssetsUrl: "StreamingAssets",
+          companyName: "Raw Fury",
+          productName: "Townscaper",
+          productVersion: "0.23",
       };
 
       var container = document.querySelector("#unity-container");
@@ -37,39 +126,33 @@
       var loadingBar = document.querySelector("#unity-loading-bar");
       var progressBarFull = document.querySelector("#unity-progress-bar-full");
       var mobileWarning = document.querySelector("#unity-mobile-warning");
-
-      // By default Unity keeps WebGL canvas render target size matched with
-      // the DOM size of the canvas element (scaled by window.devicePixelRatio)
-      // Set this to false if you want to decouple this synchronization from
-      // happening inside the engine, and you would instead like to size up
-      // the canvas DOM size and WebGL render target sizes yourself.
-      // config.matchWebGLToCanvasSize = false;
-
+      
       if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
         container.className = "unity-mobile";
-        // Avoid draining fillrate performance on mobile devices,
-        // and default/override low DPI mode on mobile browsers. Hello3
         config.devicePixelRatio = 1;
         mobileWarning.style.display = "block";
         setTimeout(() => {
           mobileWarning.style.display = "none";
         }, 5000);
       } else {
-        //canvas.style.width = "100%";
-        //canvas.style.height = "100%";
+        // ... (removed commented out styling for brevity) ...
       }
-      canvas.style.background = "url('" + buildUrl + "/WebGL.jpg') center / cover";
+      
+      // Full CDN URL for the splash image
+      canvas.style.background = "url('https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.jpg') center / cover";
       loadingBar.style.display = "block";
 
-      var script = document.createElement("script"); 
+      var script = document.createElement("script"); 
       script.src = loaderUrl;
+      
       script.onload = () => {
         createUnityInstance(canvas, config, (progress) => {
           progressBarFull.style.width = 100 * progress + "%";
         }).then((unityInstance) => {
           loadingBar.style.display = "none";
         }).catch((message) => {
-          alert(message);
+          // The error will likely be here if assembly fails
+          alert("Game load failed: " + message);
         });
       };
       document.body.appendChild(script);
