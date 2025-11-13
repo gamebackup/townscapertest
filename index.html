@@ -22,7 +22,8 @@
     
     <script>
       // The base URL for all the file parts on the CDN
-      const BASE_CDN_URL = "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/";
+      const BASE_CDN_URL = "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/"; 
+      // NOTE: I added 'Build/' back here because the parts are inside that folder.
 
       // --- NEW PART LISTS (Using the full CDN URL) ---
       const dataParts = [
@@ -37,16 +38,15 @@
       
       /**
        * Fetches and concatenates multiple file parts into a single ArrayBuffer.
-       * This is the heart of the "un-split" hack.
        */
       async function fetchAndAssembleParts(urls) {
           console.log(`[Reassembly] Fetching ${urls.length} parts from the CDN...`);
           
           const promises = urls.map(url => fetch(url).then(response => {
               if (!response.ok) {
+                  // A 404 error usually returns an HTML body, causing the MIME error!
                   throw new Error(`[Reassembly] Failed to fetch part: ${url}. Status: ${response.status}`);
               }
-              // CRITICAL: Get the data as an ArrayBuffer
               return response.arrayBuffer();
           }));
           
@@ -65,15 +65,31 @@
           return combinedBuffer.buffer;
       }
       
-   
-      // This MUST be defined BEFORE the WebGL.loader.js script runs.
-      // It hooks into the Unity engine's internal fetch mechanism.
+      /**
+       * Compiles the raw WASM ArrayBuffer into a WebAssembly.Module object.
+       * This is the hack that bypasses the MIME type check.
+       */
+      async function compileWasmBuffer(buffer) {
+          console.log("[WASM Compiler] Starting manual WASM compilation...");
+          try {
+              const module = await WebAssembly.compile(buffer);
+              console.log("[WASM Compiler] Compilation successful.");
+              return module;
+          } catch (e) {
+              console.error("[WASM Compiler] Compilation failed:", e);
+              throw new Error("Failed to compile WebAssembly module manually.");
+          }
+      }
+      
+      // ----------------------------------------------------------------------
+      // --- CRITICAL HACK: Overriding the Unity Fetcher ---
+      // ----------------------------------------------------------------------
+      
       var Module = {
-          // The Unity loader will call this function instead of its internal 'fetch'
           unityFetchExternalResource: async function (url, start, length, target, onSuccess, onError) {
               
               if (url.endsWith("/WebGL.data")) {
-                  // Intercept WebGL.data request and use our assembly function
+                  // Data File: Assemble and pass raw ArrayBuffer
                   console.log("Intercepting WebGL.data request. Assembling parts...");
                   try {
                       const buffer = await fetchAndAssembleParts(dataParts);
@@ -83,15 +99,12 @@
                   }
                   return;
               } else if (url.endsWith("/WebGL.wasm")) {
-                  // Intercept WebGL.wasm request and use our assembly function
-                   console.log("Intercepting WebGL.wasm request. Assembling parts...");
+                  // WASM File: Assemble, MANUALLY COMPILE, and pass Module object
+                  console.log("Intercepting WebGL.wasm request. Assembling & Compiling...");
                   try {
-                      // Note: We MUST make sure the response for wasm is application/wasm.
-                      // jsDelivr is often the culprit here, but since we are fetching
-                      // .part files and assembling, this might just work if the parts are
-                      // served without the strict MIME type for binary data.
-                      const buffer = await fetchAndAssembleParts(wasmParts);
-                      onSuccess(buffer);
+                      const rawBuffer = await fetchAndAssembleParts(wasmParts);
+                      const compiledModule = await compileWasmBuffer(rawBuffer); // <--- NEW STEP
+                      onSuccess(compiledModule); // Pass the compiled Module
                   } catch (e) {
                       onError(e);
                   }
@@ -111,7 +124,6 @@
       var loaderUrl = "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.loader.js"; // Full CDN URL
       
       var config = {
-          // The loader still needs these names, even though our hook intercepts the fetch
           dataUrl: buildUrl + "/WebGL.data", 
           frameworkUrl: "https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.framework.js",
           codeUrl: buildUrl + "/WebGL.wasm", 
@@ -135,14 +147,13 @@
           mobileWarning.style.display = "none";
         }, 5000);
       } else {
-        // ... (removed commented out styling for brevity) ...
+        // ...
       }
       
-      // Full CDN URL for the splash image
       canvas.style.background = "url('https://cdn.jsdelivr.net/gh/gamebackup/townscapertest@refs/heads/main/Build/WebGL.jpg') center / cover";
       loadingBar.style.display = "block";
 
-      var script = document.createElement("script"); 
+      var script = document.createElement("script");  
       script.src = loaderUrl;
       
       script.onload = () => {
@@ -151,7 +162,6 @@
         }).then((unityInstance) => {
           loadingBar.style.display = "none";
         }).catch((message) => {
-          // The error will likely be here if assembly fails
           alert("Game load failed: " + message);
         });
       };
